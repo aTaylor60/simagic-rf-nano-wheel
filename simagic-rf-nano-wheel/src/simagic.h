@@ -1,16 +1,14 @@
 // talk to Simagic wheelbase wirelessly using nRF24L01
-// by Keijo 'Kegetys' Ruotsalainen, www.kegetys.fi
-
-// requres RF24 library
+// Bassed on work by Keijo 'Kegetys' Ruotsalainen, www.kegetys.fi
+// Modified for updated(?) packet structure used on the Simagic Alpha wheelbase by Andrew 'aTaylor60' Taylor
 
 // uncomment this if you are usin an RF24 clone to disable ACKs and instead send multiple messages for redundancy
-//#define SIMAGIC_NO_ACKS
+#define SIMAGIC_NO_ACKS
 
 //#define DUMP_SENT
 //#define DUMP_RECEIVED
 
 #include <SPI.h>
-#include <nRF24L01.h>
 #include <RF24.h>
 
 #define SIMAGIC_ADDRESS   0x0110104334LL // network ID used by simagic
@@ -47,7 +45,7 @@ public:
     _radio.openWritingPipe(SIMAGIC_ADDRESS);
 
     // allow the radio to settle
-    delay(50);
+    delay(250);
     _radio.printDetails();
 
     if (!_radio.isChipConnected())
@@ -57,10 +55,10 @@ public:
 
     _lastKeepalive = 0;
     _updateNeeded = true;
-    memset(_axes, 0, numAxes);
+    memset(_axes, 0, numAxes*2); //Axis now 2 byte value to capture 12bits
   }
 
-  // sends button states to the base
+  // sends button and axis states to the base
   // must be called periodically or the rim is considered disconnected from the base
   void tick()
   {
@@ -69,27 +67,24 @@ public:
       // no update, send keepalive if needed
       if (millis() - _lastKeepalive > keepaliveRate)
       {
-        // send button state as keepalive
-        // seems type 0x00 might be some kind of dedicated keepalive message?
-        sendType(0x3C, _buttons, _axes[0], 0x00);
+        // send state as keepalive
+        sendState(0x00);
         _lastKeepalive = millis();
       }
     }
     else
     {
       // button or axis state has changed, send new state
-      sendType(0x3C, _buttons, _axes[0], 0x00, SIMAGIC_REPEAT);
-      // send second axis with bit set, contains same buttons data
-      sendType(0x3C, _buttons, _axes[1] | 0x80, 0x00, SIMAGIC_REPEAT);
+      sendState(SIMAGIC_REPEAT);
 
       _updateNeeded = false;
       _lastKeepalive = millis();  
     }
   }
 
-  // set button state as bits
-  // TODO: probably can have more than 32 buttons too
-  void setButtonBits(unsigned long buttons)
+  // Register button changes and notify need to update base
+  // TODO: probably can have more than 32 buttons too? Bigger packet size?
+  void setButtonBits(uint32_t buttons)
   {
     if (buttons == _buttons)
       return;
@@ -97,8 +92,8 @@ public:
     _updateNeeded = true;
   }
 
-  // set axis state, value range is 0 - 127
-  void setAxis(int axis, char value)
+  // Set axis state, value range is 0 - 4095, and notify need to update base
+  void setAxis(int axis, uint16_t value)
   {
     if (_axes[axis] == value)
       return;
@@ -106,15 +101,26 @@ public:
     _updateNeeded = true;
   }
 
-  // send specific type of message and its data bytes
-  void sendType(byte command, unsigned long D1D2D3D4, byte D5, byte D6, int repeat = 1)
+  /* Organise data according to data structure
+  Byte 1 = Button 1-8
+  Byte 2 = Button 9-16
+  Byte 3 = Axis 1 [0-7]
+  Byte 4 = Axis 1 [9-12] & Axis 2 [0-3]
+  Byte 5 = Axis 2 [4-12]
+  Byte 6 = Button 25-32
+  Byte 7 = Button 17-24
+
+  Axis values are 12bit across 3 bytes */
+  void sendState(int repeat)
   {
-    // TODO: D6 might be some kind of command subtype?
-    sendRaw(D1D2D3D4, command << 16 | D5 << 8 | D6);
+    sendRaw(
+      (uint32_t)_axes[0] << 28 | ((uint32_t)_axes[1] << 16) | (_buttons & 0xFFFF), 
+      (_buttons & 0xFF000000) >> 16 | (_buttons & 0x00FF0000) | (uint32_t)_axes[0] >> 4,
+      SIMAGIC_REPEAT);
   }
   
   // send raw data. last byte of b is overriden with CRC
-  void sendRaw(unsigned long a, unsigned long b, int repeat = 1)
+  void sendRaw(uint32_t a, uint32_t b, int repeat)
   {
     packetTx m;
     m.a = a;
@@ -123,7 +129,7 @@ public:
     // calculate crc, ignoring last byte
     const uint8_t crc = crc8((const uint8_t*) &m, sizeof(packetTx) - 1);
     // replace last byte with crc
-    m.b = (m.b & 0x00FFFFFF) | ((unsigned long) crc << 24);
+    m.b = (m.b & (uint32_t)0x00FFFFFF) | ((uint32_t) crc << 24);
 
 #ifdef SIMAGIC_NO_ACKS
     // if no ACKs then repeat important messages multiple times
@@ -142,19 +148,26 @@ public:
         const int packetLen = _radio.getPayloadSize();
         uint8_t buf[8];
         _radio.read(buf, min(8, packetLen));
+
 #ifdef DUMP_RECEIVED   
-        for (int i = 0; i < packetLen; i++)
-         printf_P(PSTR("%02x"), buf[i]); 
-        printf_P(PSTR(" RECV\n"));    
+        char buffer[32];
+        for (int i = 0; i < packetLen; i++) {
+          sprintf(buffer, "%02x", buf[i]);
+          Serial.print(buffer);
+        }
+        Serial.println(" RECV");
 #endif
       }      
     }
 #endif // SIMAGIC_NO_ACKS
   
 #ifdef DUMP_SENT
-    for (int i = 0; i < 8; i++)
-     printf_P(PSTR("%02x"), ((const uint8_t*)&m)[i]); 
-    printf_P(PSTR(" SENT\n"));
+    char buffer[32];
+    for (int i = 0; i < 8; i++) {
+      sprintf(buffer + i * 2, "%02x", ((const uint8_t*)&m)[i]);
+    }
+    Serial.print(buffer);
+    Serial.println(" SENT");
 #endif
   }  
   
@@ -165,16 +178,16 @@ private:
   byte _pinCe, _pinCs, _chan;
   RF24 _radio;
 
-  unsigned long _buttons; // current button state
-  char _axes[numAxes];    // axis data (7 bits)
+  uint32_t _buttons; // current button state
+  uint16_t _axes[numAxes];    // axis data (12 bits)
   bool _updateNeeded;     // if button/axis state changed and update is needed in tick()
-  unsigned long _lastKeepalive; // last millis() keepalive was sent
+  uint32_t _lastKeepalive; // last millis() keepalive was sent
   
   // buffer used to talk to the base
   struct packetTx
   {
-    unsigned long a;
-    unsigned long b;
+    uint32_t a;
+    uint32_t b;
   };
 };
 
