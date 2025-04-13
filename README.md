@@ -1,32 +1,22 @@
 # Overview
 
-![](https://junk.kegetys.fi/simagic_banner2.jpg)
+(add banner image)
 
-This is a description of the wireless protocol used by Simagic direct drive wheel bases and rims. With this you can make your own wireless rims that send button presses to the Simagic base, receive data from a Simagic rim or maybe make a separate button box that activates the base buttons (for wheels without any buttons on them).
-
-I haven't figured out the entire protocol. For example the data sent back by the base to adjust the rim LEDs is still unknown.
+This is a fork of the work started by [Kegetys](https://github.com/Kegetys) with their [simagic-arduino-poc](https://github.com/Kegetys/simagic-arduino-poc). Taking the description of the wireless protocol used by Simagic direct drive wheel bases and rims and making my own wireless rim hardware that can send button presses and aixs data to the Simagic base.
+I found some changes to the protocal were needed and those are captured here. Further there is a lot more to the protocol that neither have documented.
 
 # Hardware
 
-The rim and base contain AS01-Ml01S V4.0 wireless modules. These modules use nRF24L01 chips which are commonly used in wireless keyboards, mice and many other wireless devices. These are easy to use with Arduino IDE using the RF24 library: https://www.arduino.cc/reference/en/libraries/rf24/
+My expereimentaion has been conducted using an [RF-Nano](https://github.com/emakefun/rf-nano) (see implementaion details below) which combines an atmega328P with the nesecary nRF24L01 wireless module.
 
-The Simagic base quick release provides a 5V voltage to the rim, which is perfect for Arduino and ESP32 based microcontroller dev boards. The power is received with 5pin 2.45mm pitch pogo pins on the rim with contacts on the base. Despite having 5 pins the connector only has 5V and GND with the rest of the extra pins probably for physical redundancy.
-
-For powering and attaching your custom rim you can find a complete Simagic compatible QR with the power connectors included from Aliexpress: https://www.aliexpress.com/item/1005005142013070.html
-
-Interestingly that QR also comes with the base side connector, so you could use it also to attach a simagic rim to another base and power it, then receive button data from the rim and adapt it to the other base.
-
-There is also a custom PCB you can create in printables.com that should work in a NRG QR: https://www.printables.com/model/489715-simagic-qr-quickrelease-wheelside-pcb
-
-In the bases the wireless module is located next to the green LED above the wheel axis. You can check out Barry's disassembly of the Alpha Mini base for more details about the HW setup: https://www.youtube.com/watch?v=wPe628qP5n8
+![](https://github.com/emakefun/rf-nano/blob/master/image/rf-nano.png)
 
 # nRF24L01 setup
 
-This is the most interesting part, since in order to communicate with either the rim or the base the nRF24 needs to know the network ID, channel, speed and CRC setup used by Simagic. I attached a logic analyzer to the wireless module in my rim in order to intercept the module setup and was able to capture both the module setup process and communication with the base.
+In order to communicate with either the rim or the base the nRF24 needs to know the network ID, channel, speed and CRC setup used by Simagic. The work Kegetys undertook, [nRF24L01 setup](https://github.com/Kegetys/simagic-arduino-poc?tab=readme-ov-file#nrf24l01-setup), was foundational in enabling this implementation. Key details sumarised again here:
 
-The settings used are as follows:
 - The network ID is 0x0110104334.
-- The channel can be configured from SimPro Manager, it seems to default to 60 and it matches the RF24 hardware channel.
+- The channel can be configured from SimPro Manager and must be matched in the code, defaulted to 80 and it matches the RF24 hardware channel.
 - Speed is 250KBps, CRC is 8 bits.
 - Dynamic payloads appear to be enabled, but the payload from rim to wheel is always 8 bytes.
 - AutoAck is enabled with 7 retires, delay setting 5.
@@ -34,42 +24,29 @@ The settings used are as follows:
 
 ### Note about nRF24L01 clones
 
-The chips in the base & rim appear to be genuine Nordic Semiconductor parts while most nRF24L01 chips you find ie. from Aliexpress are clones, including my Si24R1 modules. These clone modules have a hardware bug where they have the message NO_ACK bit inverted from the genuine ones and this means they are not directly capable of communicating the ACK packets with the genuine chips. If you just want to send button and axis data from your rim to the wheel this is not a big problem, human input is so low rate that you can just send the packets multiple times and the base will amost certainly receive at least one message due to the very close proximity. I haven't noticed any missed input with this approach.
-
-But I also did find a possible workaround for this issue that works at least with the Si24R1. It involves first enabling the dynamic ACKs, writing the message to the chip buffer but with the NO_ACK bit asking to be set, then disabling dynamic ACKs again before actually sending the buffer out:
-
-```
-radio.enableDynamicAck();  // enable dynamic ACKs so se can request the NO_ACK bit
-radio.startFastWrite(&m, sizeof(packetTx), true); // ask for NO_ACK, but it actually ends up not set since the logic is inverted
-radio.disableDynamicAck();          // disable dynamic ACKs so our chip ignores the feature completely
-const bool ok = radio.txStandBy();  // send the buffer, returns true if ACK was received
-if (radio.available())
-{
-  // read ACK payload
-}
-```
-
-What I believe happens with this is that the NO_ACK bit gets not set in the FIFO buffer since its use is inverted from the spec, so the buffer is sent to the genuine module on the other end with the flag disabled. The genuine module then responds with ACK, but since we have disabled dynamic acks before actually sending the buffer out our chip correctly receives and processes the ACK packet.
+The RF-Nano I purchased from Aliexpress has the same issues that Kegetys identified. Refer back to [](https://github.com/Kegetys/simagic-arduino-poc?tab=readme-ov-file#note-about-nrf24l01-clones)
 
 # Rim to base packet structure
 
-The rim always appears to send 8 byte packets. Interestingly despite the wireless layer having a CRC checksum enabled the last byte of the packet contains another redundant 1 byte CRC-8/MAXIM checksum of the first 7 bytes. If this is not correct the base ignores the message.
+I found that the default packet structure that my wheel base expects differs to that published by Kegetys. Hardware used for development was a Simagic Alpha wheel base on firmware version 195. It was suggeted that the wheel base may default to the packet structure used by the last wheel connected to it and as I have never has an official Simagic wheel on this base nothing has changed from the factory settings. It may prove intersting to experiment with the init package and different wheel identifiers but that is for the future.
 
 The structure appears to be as follows:
 ```
-D1 D2 D3 D4 D5 D6 CO CC 
-                  || ^^ CRC checksum
-                  ^^ Command
-^^ D1-D6 are dynamic data depending on the Command sent and CRC being the CRC-8/MAXIM checksum.
+Byte 1 = Button 1-8
+Byte 2 = Button 9-16
+Byte 3 = Axis 2 [0-7]
+Byte 4 = Axis 2 [9-12] & Axis 1 [0-3]
+Byte 5 = Axis 1 [4-12]
+Byte 6 = Button 25-32
+Byte 7 = Button 17-24
+Byte 8 = CRC being the CRC-8/MAXIM checksum.
 ```
 
 ## Button + axis packet
 
-Button and axis data are sent with command 0x3c.
+Each button byte is made up of bit flags for buttons currently held down. Least significant bit is button 1 state, next bit is button 2 state etc.
 
-D1 to D4 are bit flags for buttons currently held down
-
-D6 is used for clutch paddles axis values with first bit signifiying axis to set and the rest the axis value (0 - 127).
+The two 'clutch' axis are both 12 bit values spread over 3 bytes. Axis 2 is byte 3 and the first 4 bits of byte 4 and Axis 1 is the seccond 4 bits of byte 4 followed by byte 5.
 
 ## Rim connect packets
 
@@ -77,20 +54,16 @@ When the rim is connected it identifies itself with the base and the rim apperas
 
 The data contains at least the rim type, firmware version and what looks like some kind of per-button information (maybe the LED colors?). I haven't fully examined this data, a dump is included in [initpacket.h](simagic-poc/initpacket.h)
 
-# Unknowns
-- There is apparently some kind of automatic channel negotation in some rims?
-- Parsing the ACK reply packets (they seem to contain LED info)
-- The FX Pro rim display probably also uses the same communication channel
-- Various things in the rim initialization packet
+# Hardware implementation
 
-# Proof-of-concept Arduino project
+See [simagic-rf-nano-wheel/src](simagic-rf-nano-wheel/src) folder for code for a simple wheel rim that has 6 buttons and 2 axis. The [simagic-rf-nano-wheel\hardware](simagic-rf-nano-wheel\hardware) folder will contain information on a basic breakout PCB that has an RF-Nano at its core and connectors for power from the wheel base quick connecter, 6 bottons and 2 axis.
 
-See [simagic-poc](simagic-poc) folder for an example proof-of-concept Arduino project for a rim that sends button presses to the base. The pinout is for a Wemos D1 Mini microcontroller but all you really need is an nRF24 module correctly wired to the board so any Arduino or ESP board should be easy to make work.
+The [simagic class](simagic-rf-nano-wheel/src/simagic.h) has been modified from Kegetys implementation to capture the changes to the wireless prototocal I identified.
 
-The interesting bits are in the [simagic class](simagic-poc/simagic.h).
+My hardware looks like this:
 
-My test hardware looks like this:
+![](simagic-rf-nano-wheel/hardware/PCB_PCB_simagic-rf-nano-wheel_v0.2.jpg)
 
-![](simagic-poc/hardware.jpg)
+(more to come hardware is still in transit)
 
 
