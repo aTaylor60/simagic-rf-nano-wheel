@@ -52,13 +52,14 @@ void setup()
   {
     pinMode(i, INPUT_PULLUP);
   }
+  analogReference(EXTERNAL);
   for(int i : axisPins)
   {
     pinMode(i, INPUT_PULLUP);
   }
 
   //Clear calibration if button 2 is held during startup
-  if (!digitalRead(switchPins[2]))
+  if (!digitalRead(switchPins[4]))
   {
     for (int i = 0; i < numAxis; i++)
     {
@@ -73,7 +74,7 @@ void setup()
   }
 
   //Enter axis calibration mode if button 0 is held at startup
-  if (!digitalRead(switchPins[0]))
+  if (!digitalRead(switchPins[3]))
   {
     uint16_t axis[numAxis] = {0};
 
@@ -86,7 +87,7 @@ void setup()
     }
 
     //Loop until button 1 is pressed
-    while (digitalRead(switchPins[1]))
+    while (digitalRead(switchPins[5]))
     {
       for (int i = 0; i < numAxis; i++)
       {
